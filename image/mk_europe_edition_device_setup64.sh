@@ -24,8 +24,16 @@ apt update
 #PATH=/root/fake:$PATH apt dist-upgrade --yes
 apt clean
 
-PATH=/root/fake:$PATH apt install --yes libjpeg62-turbo-dev libconfig9 rpi-update hostapd isc-dhcp-server tcpdump git cmake \
-    libusb-1.0-0-dev build-essential autoconf libtool i2c-tools libfftw3-dev libncurses-dev python-serial jq
+PATH=/root/fake:$PATH apt install --yes libjpeg62-turbo-dev libconfig9 rpi-update dnsmasq tcpdump git cmake \
+    libusb-1.0-0-dev build-essential autoconf libtool i2c-tools libfftw3-dev libncurses-dev python-serial jq ifplugd
+
+# Downgrade to older brcm wifi firmware - the new one seems to be buggy in AP+Client mode
+# see https://github.com/raspberrypi/firmware/issues/1463
+# TODO: disabled again. The old version seems to be even less reliable and drops a lot of packets for some clients.
+#wget http://archive.raspberrypi.org/debian/pool/main/f/firmware-nonfree/firmware-brcm80211_20190114-1+rpt4_all.deb
+#dpkg -i firmware-brcm80211_20190114-1+rpt4_all.deb
+#rm firmware-brcm80211_20190114-1+rpt4_all.deb
+#apt-mark hold firmware-brcm80211
 
 # try to reduce writing to SD card as much as possible, so they don't get bricked when yanking the power cable
 # Disable swap...
@@ -35,27 +43,30 @@ apt autoremove -y
 apt clean
 #echo y | rpi-update
 
-systemctl enable isc-dhcp-server
+
 systemctl enable ssh
+systemctl disable dnsmasq # we start it manually on respective interfaces
 systemctl disable dhcpcd
 systemctl disable hciuart
-systemctl disable hostapd
+systemctl disable triggerhappy
+systemctl disable wpa_supplicant
+
 systemctl disable apt-daily.timer
 systemctl disable apt-daily-upgrade.timer
+systemctl disable man-db.timer
 
-sed -i 's/INTERFACESv4=""/INTERFACESv4="wlan0"/g' /etc/default/isc-dhcp-server
+# Run DHCP on eth0 when cable is plugged in
+sed -i -e 's/INTERFACES=""/INTERFACES="eth0"/g' /etc/default/ifplugd
+
+# Generate ssh key for all installs. Otherwise it would have to be done on each boot, which takes a couple of seconds
+ssh-keygen -A -v
+systemctl disable regenerate_ssh_host_keys
+# This is usually done by the console-setup service that takes quite long of first boot..
+/lib/console-setup/console-setup.sh
+
 
 rm -r /proc/*
 rm -r /root/fake
-
-
-
-# Prepare wiringpi for fancontrol and some more tools. Need latest version for pi4 support
-cd /root && git clone https://github.com/WiringPi/WiringPi.git && cd WiringPi/wiringPi && make -j8 && make install
-cd /root && rm -r WiringPi
-#wget https://project-downloads.drogon.net/wiringpi-latest.deb
-#dpkg -i wiringpi-latest.deb
-#rm wiringpi-latest.deb
 
 
 cd /root/stratux
@@ -95,9 +106,9 @@ cd /root && rm -rf kalibrate-rtl
 
 # Install golang
 cd /root
-wget https://golang.org/dl/go1.16.1.linux-arm64.tar.gz
-tar xzf go1.16.1.linux-arm64.tar.gz
-rm go1.16.1.linux-arm64.tar.gz
+wget https://golang.org/dl/go1.17.1.linux-arm64.tar.gz
+tar xzf go1.17.1.linux-arm64.tar.gz
+rm go1.17.1.linux-arm64.tar.gz
 
 # Compile stratux
 cd /root/stratux
@@ -115,6 +126,7 @@ cd /root/stratux
 
 rm -r /root/go_path/* # safe space again..
 make install
+rm -r /root/.cache
 
 ##### Some device setup - copy files from image directory ####
 cd /root/stratux/image
@@ -122,13 +134,13 @@ cd /root/stratux/image
 cp -f motd /etc/motd
 
 #network default config. TODO: can't we just implement gen_gdl90 -write_network_settings or something to generate them from template?
-cp -f dhcpd.conf /etc/dhcp/dhcpd.conf
-cp -f hostapd.conf /etc/hostapd/hostapd.conf
+cp -f stratux-dnsmasq.conf /etc/dnsmasq.d/stratux-dnsmasq.conf
+cp -f wpa_supplicant_ap.conf /etc/wpa_supplicant/wpa_supplicant_ap.conf
 cp -f interfaces /etc/network/interfaces
-cp -f isc-dhcp-server /etc/default/isc-dhcp-server
 
 #logrotate conf
 cp -f logrotate.conf /etc/logrotate.conf
+cp -f logrotate_d_stratux /etc/logrotate.d/stratux
 
 #sshd config
 # Do not copy for now. It contains many deprecated options and isn't needed.
@@ -159,11 +171,15 @@ cp -f rc.local /etc/rc.local
 # Optionally mount /dev/sda1 as /var/log - for logging to USB stick
 echo -e "\n/dev/sda1             /var/log        auto    defaults,nofail,noatime,x-systemd.device-timeout=1ms  0       2" >> /etc/fstab
 
-#disable serial console
-sed -i /boot/cmdline.txt -e "s/console=serial0,[0-9]\+ //"
+#disable serial console, disable rfkill state restore, enable wifi on boot
+sed -i /boot/cmdline.txt -e "s/console=serial0,[0-9]\+ /systemd.restore_state=0 rfkill.default_state=1 /"
 
 #Set the keyboard layout to US.
 sed -i /etc/default/keyboard -e "/^XKBLAYOUT/s/\".*\"/\"us\"/"
+
+# Set hostname
+echo "stratux" > /etc/hostname
+sed -i /etc/hosts -e "s/raspberrypi/stratux/g"
 
 # Clean up source tree - we don't need it at runtime
 rm -r /root/stratux

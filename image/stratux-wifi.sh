@@ -16,56 +16,80 @@ function wLog () {
 }
 wLog "Running Stratux WiFI Script."
 
+interface=$1 # for dhcp and wpa_supplicant
+mode=$2 # 0=ap, 1=wifi-direct, 2=ap+client
+pin=$3 # wifi-direct pin
+
+if [ "$1" == "0" ] || [ "$1" == "1" ] || [ "$1" == "2" ]; then
+	# compatibility to old /etc/network/interfaces before eu027
+        echo "COMPAT MODE"
+	interface="wlan0"
+	mode=$1
+	pin=$2
+fi
+
+echo "interface=${interface},mode=${mode}"
+
+function terminate {
+	# Given a PID file, terminate the process specified
+	if [[ -f $1 ]]; then
+		pid="$(cat $1)"
+		rm $1
+		echo "killing $pid"
+		kill $pid
+		for i in $(seq 10); do
+			# If process exits successfully, we are done
+			echo "checking..."
+			if ! ps -p $pid; then
+				echo "terminated $pid"
+				return
+			fi
+			sleep 0.5
+		done
+		# Didn't exit in 5 secs.. kill it
+		echo "could not kill $pid. Hard kill"
+		kill -9 $pid
+		sleep 1
+	fi
+
+}
 
 function prepare-start {
 	# Preliminaries. Kill off old services.
-	# For some reason, in buster, hostapd will not start if it was just killed. Wait two seconds..
-	wLog "Killing Hostapd services "
-	/usr/bin/killall hostapd
-	sleep 1
-	/usr/bin/killall -9 hostapd
+	wLog "Killing wpa_supplicant AP services "
+	terminate /run/wpa_supplicant_ap.pid
+	terminate /run/wpa_supplicant_p2p.pid
+
 	wLog "Stopping DHCP services "
-	/bin/systemctl stop isc-dhcp-server
-
-	# Sometimes the PID file seems to remain and dhcpd becomes unable to start again?
-	# See https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=868240
-	sleep 1
-	/usr/bin/killall -9 dhcpd
-	rm /var/run/dhcpd.pid
-
-	/usr/bin/killall wpa_supplicant
-	sleep 1
-	/usr/bin/killall -9 wpa_supplicant
+	/bin/systemctl stop dnsmasq
+	/usr/bin/killall dnsmasq
 }
 
 function ap-start {
-	#Assume PI3 settings
-	DAEMON_CONF=/etc/hostapd/hostapd.conf
-	DAEMON_SBIN=/usr/sbin/hostapd
+	echo "Starting AP mode on $interface"
 
-	${DAEMON_SBIN} -B ${DAEMON_CONF}
-
+	/sbin/wpa_supplicant -P/run/wpa_supplicant_ap.pid -B -i $interface -c /etc/wpa_supplicant/wpa_supplicant_ap.conf
 	sleep 2
 
 	wLog "Restarting DHCP services"
-
-	/bin/systemctl restart isc-dhcp-server
+	dnsmasq -u dnsmasq --conf-dir=/etc/dnsmasq.d -i $interface
 }
 
 function wifi-direct-start {
-	echo "Starting wifi direct mode"
-	pin=$1
+	echo "Starting wifi direct mode on $interface"
 
-	/sbin/wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf
-	wpa_cli -i wlan0 p2p_group_add persistent=0 freq=2
+	/sbin/wpa_supplicant -P/run/wpa_supplicant_p2p.pid -B -i $interface -c /etc/wpa_supplicant/wpa_supplicant.conf
+
+	wpa_cli -i $interface p2p_group_add persistent=0 freq=2
 	(while wpa_cli -i p2p-wlan0-0 wps_pin any $pin > /dev/null; do sleep 1; done) & disown
 	ifup p2p-wlan0-0
+
+	dnsmasq -u dnsmasq --conf-dir=/etc/dnsmasq.d -i p2p-wlan0-0
 }
 
-# function to build /tmp/hostapd.conf and start AP
 prepare-start
-if [ "$1" == "1" ]; then
-	wifi-direct-start $2
+if [ "$mode" == "1" ]; then
+	wifi-direct-start
 else
 	ap-start
 fi

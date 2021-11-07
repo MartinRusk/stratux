@@ -509,7 +509,7 @@ func dataLog() {
 */
 
 func setDataLogTimeWithGPS(sit SituationData) {
-	if isGPSClockValid() {
+	if dataLogStarted && isGPSClockValid() {
 		var ts StratuxTimestamp
 		// Piggyback a GPS time update from this update.
 		ts.id = 0
@@ -578,6 +578,12 @@ func logGPSAttitude(gpsPerf gpsPerfStats) {
 func logDump1090TermMessage(m Dump1090TermMessage) {
 	if globalSettings.DEBUG && globalSettings.ReplayLog && isDataLogReady() {
 		dataLogChan <- DataLogRow{tbl: "dump1090_terminal", data: m}
+	}
+}
+
+func logAISTermMessage(m AISTermMessage) {
+	if globalSettings.DEBUG && globalSettings.ReplayLog && isDataLogReady() {
+		dataLogChan <- DataLogRow{tbl: "ais_message", data: m}
 	}
 }
 

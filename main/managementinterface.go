@@ -302,7 +302,10 @@ func handleSatellitesRequest(w http.ResponseWriter, r *http.Request) {
 func handleSettingsGetRequest(w http.ResponseWriter, r *http.Request) {
 	setNoCache(w)
 	setJSONHeaders(w)
-	settingsJSON, _ := json.Marshal(&globalSettings)
+	settingsJSON, err := json.Marshal(&globalSettings)
+	if err != nil {
+		log.Printf("%s", err)
+	}
 	fmt.Fprintf(w, "%s\n", settingsJSON)
 }
 
@@ -343,6 +346,8 @@ func handleSettingsSetRequest(w http.ResponseWriter, r *http.Request) {
 						globalSettings.ES_Enabled = val.(bool)
 					case "OGN_Enabled":
 						globalSettings.OGN_Enabled = val.(bool)
+					case "AIS_Enabled":
+						globalSettings.AIS_Enabled = val.(bool)
 					case "Ping_Enabled":
 						globalSettings.Ping_Enabled = val.(bool)
 					case "GPS_Enabled":
@@ -398,13 +403,8 @@ func handleSettingsSetRequest(w http.ResponseWriter, r *http.Request) {
 								}
 								log.Printf("changing %s baud rate from %d to %d.\n", dev, serialOut.Baud, newBaud)
 								serialOut.Baud = newBaud
-								// Close the port if it is open.
-								if serialOut.serialPort != nil {
-									log.Printf("closing %s for baud rate change.\n", dev)
-									serialOut.serialPort.Close()
-									serialOut.serialPort = nil
-								}
 								globalSettings.SerialOutputs[dev] = serialOut
+								closeSerial(dev)
 							}
 						}
 					case "WatchList":
@@ -453,6 +453,8 @@ func handleSettingsSetRequest(w http.ResponseWriter, r *http.Request) {
 							continue
 						}
 						globalSettings.StaticIps = ips
+					case "WiFiCountry":
+						setWifiCountry(val.(string))
 					case "WiFiSSID":
 						setWifiSSID(val.(string))
 					case "WiFiChannel":
@@ -461,16 +463,21 @@ func handleSettingsSetRequest(w http.ResponseWriter, r *http.Request) {
 						setWifiSecurityEnabled(val.(bool))
 					case "WiFiPassphrase":
 						setWifiPassphrase(val.(string))
-					case "WiFiSmartEnabled":
-						setWifiSmartEnabled(val.(bool))
 					case "WiFiIPAddress":
 						setWifiIPAddress(val.(string))
 					case "WiFiMode":
 						setWiFiMode(int(val.(float64)))
 					case "WiFiDirectPin":
 						setWifiDirectPin(val.(string))
-					case "SkyDemonAndroidHack":
-						globalSettings.SkyDemonAndroidHack = val.(bool)
+					case "WiFiClientNetworks":
+						var networks = make([]wifiClientNetwork, 0)
+						for _, rawNetwork := range val.([]interface{}) {
+							network := rawNetwork.(map[string]interface{})
+							networks = append(networks, wifiClientNetwork{network["SSID"].(string), network["Password"].(string)})
+						}
+						setWifiClientNetworks(networks)
+					case "WiFiInternetPassThroughEnabled":
+						setWifiInternetPassthroughEnabled(val.(bool))
 					case "EstimateBearinglessDist":
 						globalSettings.EstimateBearinglessDist = val.(bool)
 
@@ -501,7 +508,7 @@ func handleSettingsSetRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				saveSettings()
-				applyNetworkSettings(false)
+				applyNetworkSettings(false, false)
 				if reconfigureOgnTracker {
 					configureOgnTrackerFromSettings()
 				}
@@ -683,7 +690,7 @@ func handleClientsGetRequest(w http.ResponseWriter, r *http.Request) {
 	setNoCache(w)
 	setJSONHeaders(w)
 	netMutex.Lock()
-	clientsJSON, _ := json.Marshal(&outSockets)
+	clientsJSON, _ := json.Marshal(&clientConnections)
 	netMutex.Unlock()
 	fmt.Fprintf(w, "%s\n", clientsJSON)
 }

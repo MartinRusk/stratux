@@ -4,7 +4,7 @@
 	that can be found in the LICENSE file, herein included
 	as part of this header.
 
-	networksettings.go: Management functions for network settings (hostapd, IP, DHCP)
+	networksettings.go: Management functions for network settings (wpa_supplicant, IP, DHCP)
 */
 
 package main
@@ -23,23 +23,38 @@ import (
 const (
 	WifiModeAp = 0
 	WifiModeDirect = 1
+	WifiModeApClient = 2
 )
 
 // NetworkTemplateParams is passed to the template engine to write settings
 type NetworkTemplateParams struct {
 	WiFiMode         int
+	WiFiCountry      string
 	IpAddr           string
 	IpPrefix         string
 	DhcpRangeStart   string
 	DhcpRangeEnd     string
-	WiFiSmartEnabled bool
 	WiFiSSID         string
 	WiFiChannel      int
 	WiFiDirectPin    string
 	WiFiPassPhrase   string
+	WiFiClientNetworks []wifiClientNetwork
+	WiFiInternetPassThroughEnabled bool
+}
+type wifiClientNetwork struct {
+	SSID     string
+	Password string
 }
 
 var hasChanged bool
+
+
+func setWifiCountry(countryCode string) {
+	if countryCode != globalSettings.WiFiCountry {
+		globalSettings.WiFiCountry = countryCode
+		hasChanged = true
+	}
+}
 
 func setWifiSSID(ssid string) {
 	if ssid != globalSettings.WiFiSSID {
@@ -51,13 +66,6 @@ func setWifiSSID(ssid string) {
 func setWifiPassphrase(passphrase string) {
 	if passphrase != globalSettings.WiFiPassphrase {
 		globalSettings.WiFiPassphrase = passphrase
-		hasChanged = true
-	}
-}
-
-func setWifiSmartEnabled(enabled bool) {
-	if enabled != globalSettings.WiFiSmartEnabled {
-		globalSettings.WiFiSmartEnabled = enabled
 		hasChanged = true
 	}
 }
@@ -102,9 +110,33 @@ func setWifiDirectPin(pin string) {
 	}
 }
 
+func setWifiClientNetworks(networks []wifiClientNetwork) {
+	if len(globalSettings.WiFiClientNetworks) != len(networks) {
+		globalSettings.WiFiClientNetworks = networks
+		hasChanged = true
+		return
+	}
+
+	for i, net := range networks {
+		if globalSettings.WiFiClientNetworks[i].SSID != net.SSID || globalSettings.WiFiClientNetworks[i].Password != net.Password {
+			globalSettings.WiFiClientNetworks = networks
+			hasChanged = true
+			return
+		}
+	}
+}
+
+func setWifiInternetPassthroughEnabled(enabled bool) {
+	if globalSettings.WiFiInternetPassThroughEnabled != enabled {
+		globalSettings.WiFiInternetPassThroughEnabled = enabled;
+		hasChanged = true;
+	}
+}
 
 
-func applyNetworkSettings(force bool) {
+// if onlyWriteFiles is true, we only write the config files. Otherwise we also reconfigure the network
+// Also, if we only write the files, this function runs synchroneously. Otherwise the long-running network reconfiguration is done async.
+func applyNetworkSettings(force bool, onlyWriteFiles bool) {
 	if !hasChanged && !force {
 		return
 	}
@@ -135,10 +167,12 @@ func applyNetworkSettings(force bool) {
 	tplSettings.IpPrefix = ipPrefix
 	tplSettings.DhcpRangeStart = dhcpRangeStart
 	tplSettings.DhcpRangeEnd = dhcpRangeEnd
-	tplSettings.WiFiSmartEnabled = globalSettings.WiFiSmartEnabled
 	tplSettings.WiFiChannel = globalSettings.WiFiChannel
+	tplSettings.WiFiCountry = globalSettings.WiFiCountry
 	tplSettings.WiFiSSID = globalSettings.WiFiSSID
 	tplSettings.WiFiDirectPin = globalSettings.WiFiDirectPin
+	tplSettings.WiFiClientNetworks = globalSettings.WiFiClientNetworks
+	tplSettings.WiFiInternetPassThroughEnabled = globalSettings.WiFiInternetPassThroughEnabled
 	
 	if tplSettings.WiFiChannel == 0 {
 		tplSettings.WiFiChannel = 1
@@ -151,30 +185,42 @@ func applyNetworkSettings(force bool) {
 		tplSettings.WiFiSSID = "stratux"
 	}
 
-	overlayctl("unlock")
-	writeTemplate(STRATUX_HOME + "/cfg/dhcpd.conf.template", "/overlay/robase/etc/dhcp/dhcpd.conf", tplSettings)
-	writeTemplate(STRATUX_HOME + "/cfg/interfaces.template", "/overlay/robase/etc/network/interfaces", tplSettings)
-	writeTemplate(STRATUX_HOME + "/cfg/hostapd.conf.template", "/overlay/robase/etc/hostapd/hostapd.conf", tplSettings)
-	writeTemplate(STRATUX_HOME + "/cfg/wpa_supplicant.conf.template", "/overlay/robase/etc/wpa_supplicant/wpa_supplicant.conf", tplSettings)
-	overlayctl("lock")
-
-	go func() {
+	f := func() {
 		time.Sleep(time.Second)
-		cmd := exec.Command("ifdown", "wlan0")
-		if err := cmd.Start(); err != nil {
-			log.Printf("Error shutting down WiFi: %s\n", err.Error())
+		if !onlyWriteFiles {
+			cmd := exec.Command("ifdown", "wlan0")
+			if err := cmd.Start(); err != nil {
+				log.Printf("Error shutting down WiFi: %s\n", err.Error())
+			}
+			if err := cmd.Wait(); err != nil {
+				log.Printf("Error shutting down WiFi: %s\n", err.Error())
+			}
 		}
-		if err := cmd.Wait(); err != nil {
-			log.Printf("Error shutting down WiFi: %s\n", err.Error())
+
+		overlayctl("unlock")
+		writeTemplate(STRATUX_HOME + "/cfg/stratux-dnsmasq.conf.template", "/overlay/robase/etc/dnsmasq.d/stratux-dnsmasq.conf", tplSettings)
+		writeTemplate(STRATUX_HOME + "/cfg/interfaces.template", "/overlay/robase/etc/network/interfaces", tplSettings)
+		writeTemplate(STRATUX_HOME + "/cfg/wpa_supplicant.conf.template", "/overlay/robase/etc/wpa_supplicant/wpa_supplicant.conf", tplSettings)
+		writeTemplate(STRATUX_HOME + "/cfg/wpa_supplicant_ap.conf.template", "/overlay/robase/etc/wpa_supplicant/wpa_supplicant_ap.conf", tplSettings)
+		overlayctl("lock")
+
+		if !onlyWriteFiles {
+			cmd := exec.Command("ifup", "wlan0")
+			if err := cmd.Start(); err != nil {
+				log.Printf("Error starting WiFi: %s\n", err.Error())
+			}
+			if err := cmd.Wait(); err != nil {
+				log.Printf("Error starting WiFi: %s\n", err.Error())
+			}
 		}
-		cmd = exec.Command("ifup", "wlan0")
-		if err := cmd.Start(); err != nil {
-			log.Printf("Error starting WiFi: %s\n", err.Error())
-		}
-		if err := cmd.Wait(); err != nil {
-			log.Printf("Error starting WiFi: %s\n", err.Error())
-		}
-	}()
+	}
+
+
+	if onlyWriteFiles {
+		f()
+	} else {
+		go f()
+	}
 }
 
 

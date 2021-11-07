@@ -70,10 +70,14 @@ cp -f overlayctl init-overlay /sbin/
 systemctl disable apt-daily.timer
 systemctl disable apt-daily-upgrade.timer
 
+
 # cleanup after switch to overlayfs: remove tmpfs lines from fstab, move stratux.conf to /boot and potentially enable the overlay depending on user settings
 cat /etc/fstab | grep -v tmpfs > /tmp/fstab
 mv /tmp/fstab /etc/fstab
 mv /etc/stratux.conf /boot/stratux.conf
+
+# Rewrite network settings to make sure the format is up to date for next boot
+/opt/stratux/bin/gen_gdl90 -write-network-config
 
 # Add optional usb stick mount if it's not already there
 if [ "$(grep /dev/sda1 /etc/fstab)" == "" ]; then

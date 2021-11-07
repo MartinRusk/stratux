@@ -29,20 +29,20 @@ insmodule()
 
 # Make sure partition is expanded on first boot..
 if [ -f /var/grow_root_part ]; then
-    mount -t proc proc /proc
-    mount -t sysfs sys /sys
+    mount -n -t proc proc /proc
+    mount -n -t sysfs sys /sys
     sleep 1 # otherwise proc/sys not yet ready?
-    mount -o remount,rw $(findmnt / -o source -n) /
+    mount -n -o remount,rw $(findmnt / -o source -n) /
     rm /var/grow_root_part
     touch /var/grow_root_fs
     /usr/lib/raspi-config/init_resize.sh
 fi
 # On second boot, we then increase the filesystem itself..
 if [ -f /var/grow_root_fs ]; then
-    mount -t proc proc /proc
-    mount -t sysfs sys /sys
+    mount -n -t proc proc /proc
+    mount -n -t sysfs sys /sys
     sleep 1 # otherwise proc/sys not yet ready?
-    mount -o remount,rw $(findmnt / -o source -n) /
+    mount -n -o remount,rw $(findmnt / -o source -n) /
     rm /var/grow_root_fs
     rm -f /etc/init.d/resize2fs_once # so we don't get error messages on boot
     resize2fs $(findmnt / -o source -n)
@@ -56,7 +56,7 @@ if [ -e "/overlay/disable" ] ; then
     echo "Overlay disabled"
     # Stratux: make sure we always have something usable in /overlay/robase, so we can upload update .sh files there
     mkdir -p /overlay/robase
-    mount -o bind / /overlay/robase
+    mount -n -o bind / /overlay/robase
     exec /sbin/init
 fi
 
@@ -230,4 +230,8 @@ echo "Ready to proceed by pivot_root"
 #/bin/sh
 
 /sbin/pivot_root . overlay/pivot
+
+# Stratux: remove old logs from the overlay so that logrotate doesn't start to rotate and fill up the overlay
+rm -r /var/log/*
+
 exec /usr/sbin/chroot . sbin/init

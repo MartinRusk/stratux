@@ -80,6 +80,7 @@ const (
 	MSGCLASS_UAT   = 0
 	MSGCLASS_ES    = 1
 	MSGCLASS_OGN   = 2
+	MSGCLASS_AIS   = 3
 
 	LON_LAT_RESOLUTION = float32(180.0 / 8388608.0)
 	TRACK_RESOLUTION   = float32(360.0 / 256.0)
@@ -446,8 +447,8 @@ func makeOwnshipReport() bool {
 		msg[19+i] = myReg[i]
 	}
 
-	sendGDL90(prepareMessage(msg), false)
-	sendXPlane(createXPlaneGpsMsg(lat, lon, mySituation.GPSAltitudeMSL, groundTrack, float32(gdSpeed)), false)
+	sendGDL90(prepareMessage(msg), time.Second, -1)
+	sendXPlane(createXPlaneGpsMsg(lat, lon, mySituation.GPSAltitudeMSL, groundTrack, float32(gdSpeed)), time.Second, -1)
 
 	return true
 }
@@ -470,7 +471,7 @@ func makeOwnshipGeometricAltitudeReport() bool {
 	msg[3] = 0x00
 	msg[4] = 0x0A
 
-	sendGDL90(prepareMessage(msg), false)
+	sendGDL90(prepareMessage(msg), time.Second, -1)
 	return true
 }
 
@@ -742,7 +743,11 @@ func relayMessage(msgtype uint16, msg []byte) {
 		ret[i+4] = msg[i]
 	}
 
-	sendGDL90(prepareMessage(ret), true)
+	durability := 1 * time.Second
+	if msgtype == MSGTYPE_UPLINK {
+		durability = 15 * time.Minute // queue weather messages
+	}
+	sendGDL90(prepareMessage(ret), durability, 4)
 }
 
 func blinkStatusLED() {
@@ -761,29 +766,20 @@ func blinkStatusLED() {
 
 func sendAllOwnshipInfo() {
 	//log.Printf("Sending ownship info")
-	sendGDL90(makeHeartbeat(), false)
-	if !globalSettings.SkyDemonAndroidHack {
-		// Skydemon ignores these anyway - reduce data rate a bit
-		sendGDL90(makeStratuxHeartbeat(), false)
-		sendGDL90(makeStratuxStatus(), false)
-		sendGDL90(makeFFIDMessage(), false)
-	}
+	sendGDL90(makeHeartbeat(), time.Second, -20) // Highest priority, always needs to be send because we use it to detect when a client becomes available
+	sendGDL90(makeStratuxHeartbeat(), time.Second, 0)
+	sendGDL90(makeStratuxStatus(), time.Second, 0)
+	sendGDL90(makeFFIDMessage(), time.Second, 0)
 	makeOwnshipReport()
 	makeOwnshipGeometricAltitudeReport()
 }
 
 func heartBeatSender() {
-	timerFast := time.NewTicker(150 * time.Millisecond)
 	timer := time.NewTicker(1 * time.Second)
 	timerMessageStats := time.NewTicker(2 * time.Second)
 	ledBlinking := false
 	for {
 		select {
-		case <-timerFast.C:
-			// Skydemon Android socket bug workaround: send ownship info every 200ms
-			if globalSettings.SkyDemonAndroidHack {
-				sendAllOwnshipInfo()
-			}
 		case <-timer.C:
 			// Green LED - always on during normal operation.
 			//  Blinking when there is a critical system error (and Stratux is still running).
@@ -799,17 +795,14 @@ func heartBeatSender() {
 				ledBlinking = true
 			}
 
-			// Normal behaviour: Send ownship info once per secopnd
-			if !globalSettings.SkyDemonAndroidHack {
-				sendAllOwnshipInfo()
-			}
+			sendAllOwnshipInfo()
 
-			sendNetFLARM(makeGPRMCString())
-			sendNetFLARM(makeGPGGAString())
+			sendNetFLARM(makeGPRMCString(), time.Second, -1)
+			sendNetFLARM(makeGPGGAString(), time.Second, 0)
 			if isTempPressValid() && mySituation.BaroSourceType != BARO_TYPE_NONE && mySituation.BaroSourceType != BARO_TYPE_ADSBESTIMATE {
-				sendNetFLARM(makePGRMZString())
+				sendNetFLARM(makePGRMZString(), time.Second, 0)
 			}
-			sendNetFLARM("$GPGSA,A,3,,,,,,,,,,,,,1.0,1.0,1.0*33\r\n")
+			sendNetFLARM("$GPGSA,A,3,,,,,,,,,,,,,1.0,1.0,1.0*33\r\n", time.Second, 1)
 
 			// --- debug code: traffic demo ---
 			// Uncomment and compile to display large number of artificial traffic targets
@@ -856,6 +849,7 @@ func updateMessageStats() {
 	UAT_messages_last_minute := uint(0)
 	ES_messages_last_minute := uint(0)
 	OGN_messages_last_minute := uint(0)
+	AIS_messages_last_minute := uint(0)
 
 	// Clear out ADSBTowers stats.
 	for t, tinf := range ADSBTowers {
@@ -894,6 +888,8 @@ func updateMessageStats() {
 				ES_messages_last_minute++
 			} else if msgLog[i].MessageClass == MSGCLASS_OGN {
 				OGN_messages_last_minute++
+			} else if msgLog[i].MessageClass == MSGCLASS_AIS {
+				AIS_messages_last_minute++
 			}
 		}
 	}
@@ -901,6 +897,7 @@ func updateMessageStats() {
 	globalStatus.UAT_messages_last_minute = UAT_messages_last_minute
 	globalStatus.ES_messages_last_minute = ES_messages_last_minute
 	globalStatus.OGN_messages_last_minute = OGN_messages_last_minute
+	globalStatus.AIS_messages_last_minute = AIS_messages_last_minute
 
 	// Update "max messages/min" counters.
 	if globalStatus.UAT_messages_max < UAT_messages_last_minute {
@@ -911,6 +908,9 @@ func updateMessageStats() {
 	}
 	if globalStatus.OGN_messages_max < OGN_messages_last_minute {
 		globalStatus.OGN_messages_max = OGN_messages_last_minute
+	}
+	if globalStatus.AIS_messages_max < AIS_messages_last_minute {
+		globalStatus.AIS_messages_max = AIS_messages_last_minute
 	}
 
 	// Update average signal strength over last minute for all ADSB towers.
@@ -1162,6 +1162,7 @@ type settings struct {
 	UAT_Enabled          bool
 	ES_Enabled           bool
 	OGN_Enabled        bool
+	AIS_Enabled        bool
 	Ping_Enabled         bool
 	GPS_Enabled          bool
 	BMP_Sensor_Enabled   bool
@@ -1183,17 +1184,19 @@ type settings struct {
 	DeveloperMode        bool
 	GLimits              string
 	StaticIps            []string
+	WiFiCountry          string
 	WiFiSSID             string
 	WiFiChannel          int
 	WiFiSecurityEnabled  bool
 	WiFiPassphrase       string
-	WiFiSmartEnabled     bool // "Smart WiFi" - disables the default gateway for iOS.
 	NoSleep              bool
 
 	WiFiMode             int
 	WiFiDirectPin        string
 	WiFiIPAddress        string
-	SkyDemonAndroidHack  bool
+	WiFiClientNetworks   []wifiClientNetwork
+	WiFiInternetPassThroughEnabled bool
+
 	EstimateBearinglessDist bool
 	RadarLimits          int
 	RadarRange           int
@@ -1219,9 +1222,12 @@ type status struct {
 	UAT_messages_max                           uint
 	ES_messages_last_minute                    uint
 	ES_messages_max                            uint
-	OGN_messages_last_minute                 uint
-	OGN_messages_max                         uint
-	OGN_connected                            bool
+	OGN_messages_last_minute                   uint
+	OGN_messages_max                           uint
+	OGN_connected                              bool
+	AIS_messages_last_minute                   uint
+	AIS_messages_max                           uint
+	AIS_connected                              bool
 	UAT_traffic_targets_tracking               uint16
 	ES_traffic_targets_tracking                uint16
 	Ping_connected                             bool
@@ -1240,13 +1246,9 @@ type status struct {
 	CPUTempMin                                 float32
 	CPUTempMax                                 float32
 	NetworkDataMessagesSent                    uint64
-	NetworkDataMessagesSentNonqueueable        uint64
 	NetworkDataBytesSent                       uint64
-	NetworkDataBytesSentNonqueueable           uint64
 	NetworkDataMessagesSentLastSec             uint64
-	NetworkDataMessagesSentNonqueueableLastSec uint64
 	NetworkDataBytesSentLastSec                uint64
-	NetworkDataBytesSentNonqueueableLastSec    uint64
 	UAT_METAR_total                            uint32
 	UAT_TAF_total                              uint32
 	UAT_NEXRAD_total                           uint32
@@ -1291,7 +1293,6 @@ func defaultSettings() {
 	globalSettings.DeveloperMode = true
 	globalSettings.StaticIps = make([]string, 0)
 	globalSettings.NoSleep = false
-	globalSettings.SkyDemonAndroidHack = false
 	globalSettings.EstimateBearinglessDist = false
 
 	globalSettings.WiFiChannel = 1
@@ -1299,6 +1300,7 @@ func defaultSettings() {
 	globalSettings.WiFiPassphrase = ""
 	globalSettings.WiFiSSID = "stratux"
 	globalSettings.WiFiSecurityEnabled = false
+	globalSettings.WiFiClientNetworks = make([]wifiClientNetwork, 0)
 
 	globalSettings.RadarLimits = 2000
 	globalSettings.RadarRange = 10
@@ -1336,6 +1338,20 @@ func addSystemError(err error) {
 
 var systemErrsMutex *sync.Mutex
 var systemErrs map[string]string
+
+func removeSingleSystemError(ident string) {
+	systemErrsMutex.Lock()
+	if oldMsg, ok := systemErrs[ident]; ok {
+		for i, v := range globalStatus.Errors {
+			if v == oldMsg {
+				globalStatus.Errors = append(globalStatus.Errors[:i], globalStatus.Errors[i+1:]...)
+				break
+			}
+		}
+	}
+	delete(systemErrs, ident)
+	systemErrsMutex.Unlock()
+}
 
 func addSingleSystemErrorf(ident string, format string, a ...interface{}) {
 	systemErrsMutex.Lock()
@@ -1418,7 +1434,7 @@ func printStats() {
 		log.Printf(" - Disk bytes used = %s (%.1f %%), Disk bytes free = %s (%.1f %%)\n", humanize.Bytes(usage.Used()), 100*usage.Usage(), humanize.Bytes(usage.Free()), 100*(1-usage.Usage()))
 		log.Printf(" - CPUTemp=%.02f [%.02f - %.02f] deg C, MemStats.Alloc=%s, MemStats.Sys=%s, totalNetworkMessagesSent=%s\n", globalStatus.CPUTemp, globalStatus.CPUTempMin, globalStatus.CPUTempMax, humanize.Bytes(uint64(memstats.Alloc)), humanize.Bytes(uint64(memstats.Sys)), humanize.Comma(int64(totalNetworkMessagesSent)))
 		log.Printf(" - UAT/min %s/%s [maxSS=%.02f%%], ES/min %s/%s, Total traffic targets tracked=%s", humanize.Comma(int64(globalStatus.UAT_messages_last_minute)), humanize.Comma(int64(globalStatus.UAT_messages_max)), float64(maxSignalStrength)/10.0, humanize.Comma(int64(globalStatus.ES_messages_last_minute)), humanize.Comma(int64(globalStatus.ES_messages_max)), humanize.Comma(int64(len(seenTraffic))))
-		log.Printf(" - Network data messages sent: %d total, %d nonqueueable.  Network data bytes sent: %d total, %d nonqueueable.\n", globalStatus.NetworkDataMessagesSent, globalStatus.NetworkDataMessagesSentNonqueueable, globalStatus.NetworkDataBytesSent, globalStatus.NetworkDataBytesSentNonqueueable)
+		log.Printf(" - Network data messages sent: %d total.  Network data bytes sent: %d total.\n", globalStatus.NetworkDataMessagesSent, globalStatus.NetworkDataBytesSent)
 		if globalSettings.GPS_Enabled {
 			log.Printf(" - Last GPS fix: %s, GPS solution type: %d using %d satellites (%d/%d seen/tracked), NACp: %d, est accuracy %.02f m\n", stratuxClock.HumanizeTime(mySituation.GPSLastFixLocalTime), mySituation.GPSFixQuality, mySituation.GPSSatellites, mySituation.GPSSatellitesSeen, mySituation.GPSSatellitesTracked, mySituation.GPSNACp, mySituation.GPSHorizontalAccuracy)
 			log.Printf(" - GPS vertical velocity: %.02f ft/sec; GPS vertical accuracy: %v m\n", mySituation.GPSVerticalSpeed, mySituation.GPSVerticalAccuracy)
@@ -1435,6 +1451,9 @@ func printStats() {
 			log.Printf("- " + strings.Join(sensorsOutput, ", ") + "\n")
 		}
 		// Check if we're using more than 95% of the free space. If so, throw a warning (only once).
+		if usage == nil { // happens after startup when in debugger
+			usage = du.NewDiskUsage("/")
+		}
 		if usage.Usage() > 0.95 {
 			addSingleSystemErrorf("disk-space", "Disk bytes used = %s (%.1f %%), Disk bytes free = %s (%.1f %%)", humanize.Bytes(usage.Used()), 100*usage.Usage(), humanize.Bytes(usage.Free()), 100*(1-usage.Usage()))
 		}
@@ -1620,6 +1639,7 @@ func main() {
 	replayFlag := flag.Bool("replay", false, "Replay file flag")
 	replaySpeed := flag.Int("speed", 1, "Replay speed multiplier")
 	stdinFlag := flag.Bool("uatin", false, "Process UAT messages piped to stdin")
+	writeNetworkConfig := flag.Bool("write-network-config", false, "Only write network configuration files as configured in stratux.conf and exit")
 
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to file")
 
@@ -1653,7 +1673,15 @@ func main() {
 		syscall.Dup3(int(fp.Fd()), 2, 0)
 	}
 
+	// Read settings.
+	readSettings()
+
 	log.Printf("Stratux %s (%s) starting.\n", stratuxVersion, stratuxBuild)
+	if *writeNetworkConfig {
+		log.Printf("Only writing network settings...")
+		applyNetworkSettings(true, true)
+		return
+	}
 
 	ADSBTowers = make(map[string]ADSBTower)
 	ADSBTowerMutex = &sync.Mutex{}
@@ -1668,8 +1696,6 @@ func main() {
 	pingInit()
 	initTraffic()
 
-	// Read settings.
-	readSettings()
 
 	// Disable replay logs when replaying - so that messages replay data isn't copied into the logs.
 	// Override after reading in the settings.

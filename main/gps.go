@@ -233,7 +233,9 @@ func initGPSSerial() bool {
 	} else if _, err := os.Stat("/dev/prolific0"); err == nil { // Assume it's a BU-353-S4 SIRF IV.
 		//TODO: Check a "serialout" flag and/or deal with multiple prolific devices.
 		isSirfIV = true
-		baudrates[0] = 4800
+		// default to 4800 for SiRFStar config port, we then change and detect it with 38400.
+		// We also try 9600 just in case this is something else, as this is the most popular value
+		baudrates = []int{4800, 38400, 9600}
 		device = "/dev/prolific0"
 		globalStatus.GPS_detected_type = GPS_TYPE_PROLIFIC
 	} else if _, err := os.Stat("/dev/serialin"); err == nil {
@@ -268,19 +270,9 @@ func initGPSSerial() bool {
 
 	if isSirfIV {
 		log.Printf("Using SiRFIV config.\n")
-		// Enable 38400 baud.
-		p.Write(makeNMEACmd("PSRF100,1,38400,8,1,0"))
-		baudrates[0] = 38400
-		p.Close()
-
-		time.Sleep(250 * time.Millisecond)
-		// Re-open port at newly configured baud so we can configure 5Hz messages.
-		serialConfig = &serial.Config{Name: device, Baud: baudrates[0]}
-		p, err = serial.OpenPort(serialConfig)
 
 		// Enable 5Hz. (To switch back to 1Hz: $PSRF103,00,7,00,0*22)
 		p.Write(makeNMEACmd("PSRF103,00,6,00,0"))
-
 		// Enable GGA.
 		p.Write(makeNMEACmd("PSRF103,00,00,01,01"))
 		// Enable GSA.
@@ -291,6 +283,8 @@ func initGPSSerial() bool {
 		p.Write(makeNMEACmd("PSRF103,05,00,01,01"))
 		// Enable GSV (once every 5 position updates)
 		p.Write(makeNMEACmd("PSRF103,03,00,05,01"))
+		// Enable 38400 baud.
+		p.Write(makeNMEACmd("PSRF100,1,38400,8,1,0"))
 
 		if globalSettings.DEBUG {
 			log.Printf("Finished writing SiRF GPS config to %s. Opening port to test connection.\n", device)
@@ -561,10 +555,12 @@ func configureOgnTracker() {
 
 	gpsTimeOffsetPpsMs = 200 * time.Millisecond
 	serialPort.Write([]byte(appendNmeaChecksum("$POGNS,NavRate=5") + "\r\n")) // Also force NavRate directly, just to make sure it's always set
+	msgVersion := appendNmeaChecksum(fmt.Sprintf("$POGNS,Hard=STX,Soft=%s", stratuxVersion[1:])) + "\r\n"
+	serialPort.Write([]byte(msgVersion))
+
 	serialPort.Write([]byte(getOgnTrackerConfigQueryString())) // query current configuration
 
-	// Configuration for OGN Tracker T-Beam is similar to normal Ublox config, but
-
+	// Configuration for OGN Tracker T-Beam is similar to normal Ublox config
 	writeUblox8ConfigCommands(serialPort)
 	writeUbloxGenericCommands(5, serialPort)
 
@@ -1037,6 +1033,20 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		}
 		mySituation.muGPS.Unlock()
 	}()
+	// Simulate in-flight moving GPS, useful in combination with demo traffic in gen_gdl90.go
+	/*defer func() {
+		tmpSituation := mySituation
+		if strings.Contains(l, "GGA,") || strings.Contains(l, "RMC,") {
+			tmpSituation.GPSLatitude += float32(stratuxClock.Milliseconds) / 1000.0 / 60.0 / 30.0
+		}
+
+		tmpSituation.GPSTrueCourse = 0
+		tmpSituation.GPSGroundSpeed = 110
+		tmpSituation.GPSAltitudeMSL = 5000
+		tmpSituation.GPSHeightAboveEllipsoid = 5000
+		tmpSituation.BaroPressureAltitude = 4800
+		mySituation = tmpSituation
+	}()*/
 
 	// Local variables for GPS attitude estimation
 	thisGpsPerf := gpsPerf                              // write to myGPSPerfStats at end of function IFF
@@ -1889,7 +1899,8 @@ func gpsSerialReader() {
 }
 
 func makeAHRSSimReport() {
-	sendXPlane(createXPlaneAttitudeMsg(float32(mySituation.AHRSGyroHeading), float32(mySituation.AHRSPitch), float32(mySituation.AHRSRoll)), false)
+	msg := createXPlaneAttitudeMsg(float32(mySituation.AHRSGyroHeading), float32(mySituation.AHRSPitch), float32(mySituation.AHRSRoll))
+	sendXPlane(msg, 100 * time.Millisecond, 1)
 }
 
 /*
@@ -1941,7 +1952,7 @@ func makeFFAHRSMessage() {
 	msg[10] = byte((tas >> 8) & 0xFF)
 	msg[11] = byte(tas & 0xFF)
 
-	sendMsg(prepareMessage(msg), NETWORK_AHRS_GDL90, false)
+	sendMsg(prepareMessage(msg), NETWORK_AHRS_GDL90, 200 * time.Millisecond, 3)
 }
 
 /*
@@ -2039,7 +2050,7 @@ func makeAHRSGDL90Report() {
 	msg[22] = 0x7F
 	msg[23] = 0xFF
 
-	sendMsg(prepareMessage(msg), NETWORK_AHRS_GDL90, false)
+	sendMsg(prepareMessage(msg), NETWORK_AHRS_GDL90, 100 * time.Millisecond, 3)
 }
 
 func gpsAttitudeSender() {
@@ -2154,7 +2165,7 @@ func isGPSClockValid() bool {
 func isAHRSValid() bool {
 	// If attitude information gets to be over 1 second old, declare invalid.
 	// If no GPS then we won't use or send attitude information.
-	return (globalSettings.DeveloperMode || isGPSValid()) && stratuxClock.Since(mySituation.AHRSLastAttitudeTime).Seconds() < 1
+	return isGPSValid() && stratuxClock.Since(mySituation.AHRSLastAttitudeTime).Seconds() < 1
 }
 
 func isTempPressValid() bool {
