@@ -207,7 +207,11 @@ func (f *OGN) read() {
 		}
 	}
 
-	cmd := exec.Command(STRATUX_HOME + "/bin/ogn-rx-eu", "-d", strconv.Itoa(f.indexID), "-p", strconv.Itoa(f.ppm), "-L/var/log/")
+	args := []string {"-d", strconv.Itoa(f.indexID), "-p", strconv.Itoa(f.ppm), "-L/var/log/"}
+	if !globalSettings.OGNI2CTXEnabled {
+		args = append(args, "-t", "off")
+	}
+	cmd := exec.Command(STRATUX_HOME + "/bin/ogn-rx-eu", args...)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	autoRestart := true // automatically restart crashing child process
@@ -795,20 +799,23 @@ func sdrWatcher() {
 	prevESEnabled := false
 	prevOGNEnabled := false
 	prevAISEnabled := false
+	prevOGNTXEnabled := false
 
 	// Get the system (RPi) uptime.
 	info := syscall.Sysinfo_t{}
 	err := syscall.Sysinfo(&info)
-	if err == nil {
-		// Got system uptime. Delay if and only if the system uptime is less than 120 seconds. This should be plenty of time
-		//  for the RPi to come up and start Stratux. Keeps the delay from happening if the daemon is auto-restarted from systemd.
-		if info.Uptime < 120 {
-			time.Sleep(90 * time.Second)
-		} else if globalSettings.DeveloperMode {
-			// Throw a "critical error" if developer mode is enabled. Alerts the developer that the daemon was restarted (possibly)
-			//  unexpectedly.
-			addSingleSystemErrorf("restart-warn", "System uptime %d seconds. Daemon was restarted.\n", info.Uptime)
-		}
+
+	if err == nil && info.Uptime > 120 && globalSettings.DeveloperMode {
+		// Throw a "critical error" if developer mode is enabled. Alerts the developer that the daemon was restarted (possibly)
+		//  unexpectedly.
+		addSingleSystemErrorf("restart-warn", "System uptime %d seconds. Daemon was restarted.\n", info.Uptime)
+	}
+
+	// Got system uptime. Delay SDR start for a bit to reduce noise for the GPS to get a fix.
+	// Will give up waiting after 120s without fix
+	for err == nil && info.Uptime < 120 && !isGPSValid()  {
+		time.Sleep(1 * time.Second)
+		err = syscall.Sysinfo(&info)
 	}
 
 	for {
@@ -870,6 +877,7 @@ func sdrWatcher() {
 		uatEnabled := globalSettings.UAT_Enabled
 		ognEnabled := globalSettings.OGN_Enabled
 		aisEnabled := globalSettings.AIS_Enabled
+		ognTXEnabled := globalSettings.OGNI2CTXEnabled
 		count := rtl.GetDeviceCount()
 		interfaceCount := count
 		if globalStatus.UATRadio_connected {
@@ -882,7 +890,7 @@ func sdrWatcher() {
 			count = 3
 		}
 
-		if interfaceCount == prevCount && prevESEnabled == esEnabled && prevUATEnabled == uatEnabled && prevOGNEnabled == ognEnabled && prevAISEnabled == aisEnabled {
+		if interfaceCount == prevCount && prevESEnabled == esEnabled && prevUATEnabled == uatEnabled && prevOGNEnabled == ognEnabled && prevAISEnabled == aisEnabled && prevOGNTXEnabled == ognTXEnabled {
 			continue
 		}
 
@@ -910,6 +918,7 @@ func sdrWatcher() {
 		prevESEnabled = esEnabled
 		prevOGNEnabled = ognEnabled
 		prevAISEnabled = aisEnabled
+		prevOGNTXEnabled = ognTXEnabled
 
 		countEnabled := 0
 
