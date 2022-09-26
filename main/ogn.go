@@ -162,7 +162,11 @@ func importOgnStatusMessage(msg OgnMessage) {
 func importOgnTrafficMessage(msg OgnMessage, data string) {
 	var ti TrafficInfo
 	addressBytes, _ := hex.DecodeString(msg.Addr)
-	addressBytes = append([]byte{0}, addressBytes...)
+	addressBytes = append([]byte{0}, addressBytes...) // prepend 0 byte
+	if len(addressBytes) != 4 {
+		log.Printf("Ignoring invalid ogn address: " + msg.Addr)
+		return
+	}
 	address := binary.BigEndian.Uint32(addressBytes)
 
 	// GDL90 only knows 2 address types. ICAO and non-ICAO, so we map to those.
@@ -242,6 +246,13 @@ func importOgnTrafficMessage(msg OgnMessage, data string) {
 	}
 	ti.Last_source = TRAFFIC_SOURCE_OGN
 	if msg.Time > 0 {
+		if msg.Time < ti.Timestamp.Unix() {
+			//log.Printf("Discarding traffic message from %d as it is %fs too old", ti.Icao_addr, ti.Timestamp.Unix() - msg.Time)
+			return
+		}
+
+
+
 		ti.Timestamp = time.Unix(msg.Time, 0)
 	} else {
 		ti.Timestamp = time.Now().UTC()
